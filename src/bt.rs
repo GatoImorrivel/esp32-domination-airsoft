@@ -1,7 +1,20 @@
-use std::{fmt::Display, sync::{Arc, RwLock, atomic::AtomicBool}};
+use std::{
+    fmt::Display,
+    sync::{atomic::AtomicBool, Arc, RwLock},
+};
 
 use anyhow::Result;
-use esp_idf_svc::{bt::{BdAddr, BtClassic, BtDriver, a2dp::{ConnectionStatus, EspA2dp, Source}, avrc::controller::EspAvrcc, gap::{EspGap, InqMode}}, hal::prelude::Peripherals, nvs::EspDefaultNvsPartition, sys::{esp_a2d_media_ctrl, esp_a2d_media_ctrl_t_ESP_A2D_MEDIA_CTRL_START}};
+use esp_idf_svc::{
+    bt::{
+        a2dp::{ConnectionStatus, EspA2dp, Source},
+        avrc::controller::EspAvrcc,
+        gap::{EspGap, InqMode},
+        BdAddr, BtClassic, BtDriver,
+    },
+    hal::prelude::Peripherals,
+    nvs::EspDefaultNvsPartition,
+    sys::{esp_a2d_media_ctrl, esp_a2d_media_ctrl_t_ESP_A2D_MEDIA_CTRL_START},
+};
 
 type BtClassicDriver = BtDriver<'static, BtClassic>;
 type EspBtClassicGap = EspGap<'static, BtClassic, Arc<BtClassicDriver>>;

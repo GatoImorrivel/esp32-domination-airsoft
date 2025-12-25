@@ -1,6 +1,4 @@
-use std::{
-    ffi::CStr,
-};
+use std::ffi::CStr;
 
 use anyhow::{Ok, Result};
 use esp_idf_svc::{
@@ -8,8 +6,8 @@ use esp_idf_svc::{
         EspEvent, EspEventDeserializer, EspEventPostData, EspEventSerializer, EspEventSource,
         EspSystemEventLoop,
     },
-    hal::{delay::FreeRtos},
-    sys::{EspError},
+    hal::delay::FreeRtos,
+    sys::EspError,
 };
 
 pub mod bt;

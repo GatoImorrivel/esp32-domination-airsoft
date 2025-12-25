@@ -25,6 +25,7 @@ experimental = ["esp-idf-svc/experimental"]
 log = "0.4"
 esp-idf-svc = { version = "0.51", features = ["std", "experimental", "alloc", "default"] }
 anyhow = "1.0.100"
+rand = "0.9.2"
 
 # --- Optional Embassy Integration ---
 # esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }

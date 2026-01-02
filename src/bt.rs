@@ -53,10 +53,7 @@ fn spawn_audio_task(rx: Receiver<AudioCommand>) {
 
                     // ---- PREFILL ----
                     let prefill = PREFILL.min(data.len());
-                    bt.send_bytes(
-                        &data[..prefill],
-                        esp_idf_svc::sys::TickType_t::MAX,
-                    );
+                    bt.send_bytes(&data[..prefill], esp_idf_svc::sys::TickType_t::MAX);
 
                     let mut offset = prefill;
 
@@ -69,10 +66,7 @@ fn spawn_audio_task(rx: Receiver<AudioCommand>) {
 
                         let end = (offset + CHUNK).min(data.len());
 
-                        bt.send_bytes(
-                            &data[offset..end],
-                            esp_idf_svc::sys::TickType_t::MAX,
-                        );
+                        bt.send_bytes(&data[offset..end], esp_idf_svc::sys::TickType_t::MAX);
 
                         offset = end;
 
@@ -262,12 +256,7 @@ impl BluetoothAudio {
         unsafe {
             let mut size = 0;
             loop {
-                let item = xRingbufferReceiveUpTo(
-                    self.ring_buf.0,
-                    &mut size,
-                    0,
-                    usize::MAX,
-                );
+                let item = xRingbufferReceiveUpTo(self.ring_buf.0, &mut size, 0, usize::MAX);
                 if item.is_null() {
                     break;
                 }
@@ -377,5 +366,17 @@ impl BluetoothAudio {
         self.gap.unsubscribe()?;
 
         Ok(())
+    }
+
+    pub async fn discover_devices(&self) -> Arc<[BtDevice]> {
+        let _ = self.start_discovery();
+
+        FreeRtos::delay_ms(10_000);
+
+        let _ = self.stop_discovery();
+
+        let devices = self.discovered_devices();
+        let devices_vec = devices.read().unwrap().clone();
+        devices_vec.into()
     }
 }

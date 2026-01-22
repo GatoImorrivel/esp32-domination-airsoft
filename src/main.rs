@@ -1,21 +1,17 @@
 use anyhow::{Ok, Result};
 use esp_idf_svc::{
-    eventloop::EspSystemEventLoop,
-    hal::prelude::Peripherals,
-    nvs::EspDefaultNvsPartition,
-    timer::EspTaskTimerService,
-    wifi::{AsyncWifi, EspWifi},
+    eventloop::EspSystemEventLoop, hal::prelude::Peripherals, nvs::EspDefaultNvsPartition, sys::l64a, timer::EspTaskTimerService, wifi::{AsyncWifi, EspWifi}
 };
 
-use crate::{app::App, hardware::buttons::InputButton, hardware::wifi::Wifi};
+use crate::{app::{App, AppClient, Team}, hardware::{buttons::InputButton, wifi::Wifi}};
 use crate::{
-    app::{AppEvent, Team},
     hardware::bt::BluetoothAudio,
 };
 
 pub mod assets;
 pub mod hardware;
 pub mod app;
+mod infra;
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -25,35 +21,38 @@ fn main() -> Result<()> {
     let nvs = EspDefaultNvsPartition::take()?;
     let sys_loop = EspSystemEventLoop::take()?;
     let (wifi_modem, bt_modem) = peripherals.modem.split();
-    BluetoothAudio::init(bt_modem, Some(nvs.clone()))?;
 
     let wifi_timer = EspTaskTimerService::new()?;
     let async_wifi = AsyncWifi::wrap(
-        EspWifi::new(wifi_modem, sys_loop.clone(), Some(nvs))?,
+        EspWifi::new(wifi_modem, sys_loop.clone(), Some(nvs.clone()))?,
         sys_loop.clone(),
         wifi_timer,
     )?;
-    let wifi = Wifi::new(async_wifi);
 
-    let mut red_btn = InputButton::new(peripherals.pins.gpio19, 50)?;
-    let red_pub = sys_loop.clone();
-    red_btn.set_callback(move || {
-        red_pub
-            .post::<AppEvent>(&AppEvent::ButtonPress(Team::Red), 0)
-            .unwrap();
-    })?;
+    let red_btn = InputButton::new(peripherals.pins.gpio19, 50)?;
+    let blue_btn = InputButton::new(peripherals.pins.gpio18, 50)?;
+    let wifi = Wifi::init(async_wifi);
+    let bt = BluetoothAudio::init(bt_modem, Some(nvs.clone()))?;
+    let app = App::init(wifi, bt);
 
-    let mut blue_btn = InputButton::new(peripherals.pins.gpio18, 50)?;
-    let blue_pub = sys_loop.clone();
-    blue_btn.set_callback(move || {
-        blue_pub
-            .post::<AppEvent>(&AppEvent::ButtonPress(Team::Blue), 0)
-            .unwrap();
-    })?;
 
-    let app = App::default();
+    esp_idf_svc::hal::task::block_on(async move {
+        app.run(move |client| {
+            if red_btn.is_pressed() {
+                let result = client.team_press(Team::Red);
+                if result.is_err() {
+                    log::error!("Failed to register red team press");
+                }
+            }
 
-    app.run(wifi, sys_loop.clone());
+            if blue_btn.is_pressed() {
+                let result = client.team_press(Team::Blue);
+                if result.is_err() {
+                    log::error!("Failed to register blue team press");
+                }
+            }
+        }).await;
+    });
 
     Ok(())
 }

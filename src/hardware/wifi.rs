@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use anyhow::Ok;
 use esp_idf_svc::wifi::{AccessPointConfiguration, AsyncWifi, ClientConfiguration, EspWifi};
 
@@ -5,8 +7,14 @@ pub struct Wifi {
     wifi: AsyncWifi<EspWifi<'static>>,
 }
 
+impl Debug for Wifi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Wifi")
+    }
+}
+
 impl Wifi {
-    pub fn new(wifi: AsyncWifi<EspWifi<'static>>) -> Self {
+    pub fn init(wifi: AsyncWifi<EspWifi<'static>>) -> Self {
         Self { wifi }
     }
 

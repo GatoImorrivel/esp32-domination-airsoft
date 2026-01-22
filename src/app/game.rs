@@ -1,6 +1,10 @@
 use std::time::{Duration, Instant};
 
-use crate::app::Team;
+#[derive(Debug, Clone, Copy)]
+pub enum Team {
+    Red,
+    Blue,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct GameState {
@@ -41,6 +45,7 @@ impl GameState {
         self.last_tick = Some(Instant::now());
         self.team_red_time = Duration::ZERO;
         self.team_blue_time = Duration::ZERO;
+        log::info!("Game started");
     }
 
     /// Stop the game (no more accumulation)
@@ -49,6 +54,7 @@ impl GameState {
         self.active = false;
         self.current_team = None;
         self.last_tick = None;
+        log::info!("Game stopped");
     }
 
     /// Handle a button press
@@ -62,6 +68,8 @@ impl GameState {
 
         // Switch ownership
         self.current_team = Some(team);
+
+        log::info!("{team:#?} pressed the button");
     }
 
     /// Call this periodically (e.g. every 50–100 ms)
@@ -100,12 +108,17 @@ impl GameState {
     }
 
     /// Expose current scores (for UI / WS)
-    pub fn scores(&self) -> (Duration, Duration) {
-        (self.team_blue_time, self.team_red_time)
+    pub fn scores(&self) -> Scores {
+        Scores { red: self.team_red_time, blue: self.team_blue_time }
     }
 
     /// Who currently owns the point
     pub fn current_team(&self) -> Option<Team> {
         self.current_team
     }
+}
+
+pub struct Scores {
+    red: Duration,
+    blue: Duration
 }

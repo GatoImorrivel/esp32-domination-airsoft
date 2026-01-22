@@ -9,7 +9,7 @@ pub struct HttpServer {
 
 impl HttpServer {
     pub fn new() -> Self {
-        let mut server = EspHttpServer::new(&esp_idf_svc::http::server::Configuration {
+        let server = EspHttpServer::new(&esp_idf_svc::http::server::Configuration {
             ..Default::default()
         })
         .unwrap();

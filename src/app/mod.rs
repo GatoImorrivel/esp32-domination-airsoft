@@ -1,105 +1,24 @@
 mod game;
-mod server;
 
 use std::{
-    ffi::CStr, io::Repeat, time::Duration
+    fmt::Debug,
+    sync::{Arc, OnceLock, mpsc}, time::Duration,
 };
 
-use esp_idf_svc::{
-    eventloop::{
-        EspEvent, EspEventDeserializer, EspEventPostData, EspEventSerializer, EspEventSource,
-        EspSystemEventLoop,
-    },
-    http::server::EspHttpServer,
-};
-
-use crate::{
-    app::server::{HttpServer, Response}, assets::{BLUE_TEAM_CAPTURE_SOUND, RED_TEAM_CAPTURE_SOUND}, hardware::{bt::BluetoothAudio, wifi::Wifi}
-};
-
+use anyhow::anyhow;
+use esp_idf_svc::hal::delay::FreeRtos;
 use game::GameState;
 
+pub use game::{Scores, Team};
 
-#[derive(Debug)]
-pub struct App {
-    app_state: AppState,
-    current_game: GameState,
-}
+use crate::{
+    assets::{BLUE_TEAM_CAPTURE_SOUND, RED_TEAM_CAPTURE_SOUND},
+    hardware::{bt::BluetoothAudio, wifi::Wifi},
+};
 
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            app_state: AppState::Setup,
-            current_game: GameState::default(),
-        }
-    }
-}
-
-impl App {
-    pub fn run(mut self, mut wifi: Wifi, event_loop: EspSystemEventLoop) {
-        let mut server = HttpServer::new();
-
-        let start_el = event_loop.clone();
-        server.post::<_, (), _>("/game/start", move |_| {
-            start_el.post::<AppEvent>(&AppEvent::StartGame, 0).unwrap();
-            Response::ok()
-        });
-
-        let stop_el = event_loop.clone();
-        server.post::<_, (), _>("/game/end", move |_| {
-            stop_el.post::<AppEvent>(&AppEvent::EndGame { winner: None }, 0).unwrap();
-            Response::ok()
-        });
-
-        esp_idf_svc::hal::task::block_on(core::pin::pin!(async move {
-            wifi.ap_mode().await.unwrap();
-            let mut sub = event_loop.subscribe_async::<AppEvent>().unwrap();
-            let bt = BluetoothAudio::get().unwrap();
-            loop {
-                let ev = sub.recv().await.unwrap();
-
-                match ev {
-                    AppEvent::StartGame => {
-                        if !self.current_game.active() {
-                            let mut game = GameState::new(Duration::from_secs(10));
-                            game.start();
-                            self.current_game = game;
-                        }
-                    }
-                    AppEvent::EndGame { winner } => {
-                        if !self.current_game.active() {
-                            return;
-                        }
-
-                        self.current_game.stop();
-
-                        if let Some(winner) = winner {
-                            log::info!("Winner is {winner:?}");
-                        } else {
-                            log::info!("Game ended with no winner");
-                        }
-                    }
-                    AppEvent::ButtonPress(team) => {
-                        if !self.current_game.active() {
-                            return;
-                        }
-
-                        match team {
-                            Team::Blue => {
-                                log::info!("Blue team pressed");
-                                bt.play_audio(BLUE_TEAM_CAPTURE_SOUND);
-                            }
-                            Team::Red => {
-                                log::info!("Red team pressed");
-                                bt.play_audio(RED_TEAM_CAPTURE_SOUND);
-                            }
-                        }
-                        self.current_game.button_press(team);
-                    }
-                }
-            }
-        }));
-    }
+pub enum AppEvent {
+    Command(Box<dyn FnOnce(&mut App) + Send>),
+    Query(Box<dyn FnOnce(&App) + Send>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,43 +28,161 @@ pub enum AppState {
     InGame,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Team {
-    Red,
-    Blue,
+#[derive(Debug)]
+pub struct App {
+    app_state: AppState,
+    current_game: GameState,
+    receiver: mpsc::Receiver<AppEvent>,
+    sender: mpsc::Sender<AppEvent>,
+    wifi: Wifi,
+    bluetooth_audio: Arc<BluetoothAudio>,
 }
 
-#[allow(dead_code)]
-#[derive(Copy, Clone, Debug)]
-pub enum AppEvent {
-    ButtonPress(Team),
-    StartGame,
-    EndGame { winner: Option<Team> },
-}
+impl App {
+    pub fn init(wifi: Wifi, bt: Arc<BluetoothAudio>) -> Self {
+        let (tx, rx) = mpsc::channel::<AppEvent>();
+        let app = Self {
+            app_state: AppState::Setup,
+            current_game: GameState::default(),
+            receiver: rx,
+            sender: tx,
+            wifi,
+            bluetooth_audio: bt,
+        };
+        APP_CLIENT.set(app.client()).unwrap();
+        app
+    }
 
-unsafe impl EspEventSource for AppEvent {
-    #[allow(clippy::manual_c_str_literals)]
-    fn source() -> Option<&'static CStr> {
-        // String should be unique across the whole project and ESP IDF
-        Some(CStr::from_bytes_with_nul(b"DOMINACAO-SERVICE\0").unwrap())
+    pub async fn run<F: Fn(&AppClient) -> () + Send + 'static>(mut self, routine: F) {
+        self.wifi.ap_mode().await.unwrap();
+        let client = self.client();
+        std::thread::spawn(move || {
+            loop {
+                routine(&client);
+                // Yield for a little
+                FreeRtos::delay_ms(10);
+            }
+        });
+        loop {
+            if self.current_game.active() {
+                self.current_game.tick();
+            }
+
+            while let Ok(event) = self.receiver.try_recv() {
+                match event {
+                    AppEvent::Command(func) => {
+                        func(&mut self);
+                    }
+                    AppEvent::Query(func) => {
+                        func(&self);
+                    }
+                }
+            }
+
+            // Yield for a little
+            FreeRtos::delay_ms(10);
+        }
+    }
+
+    pub fn client(&self) -> AppClient {
+        AppClient {
+            bus: AppBus {
+                sender: self.sender.clone(),
+            },
+        }
     }
 }
 
-impl EspEventSerializer for AppEvent {
-    type Data<'a> = AppEvent;
+#[derive(Clone, Debug)]
+pub struct AppBus {
+    sender: mpsc::Sender<AppEvent>,
+}
 
-    fn serialize<F, R>(event: &Self::Data<'_>, f: F) -> R
-    where
-        F: FnOnce(&EspEventPostData) -> R,
-    {
-        f(&unsafe { EspEventPostData::new(Self::source().unwrap(), Self::event_id(), event) })
+impl AppBus {
+    pub fn query<R: Send + 'static, F: FnOnce(&App) -> R + Send + 'static>(
+        &self,
+        action: F,
+    ) -> anyhow::Result<R> {
+        let (tx, rx) = mpsc::channel();
+
+        let function = move |app: &App| {
+            let resp = action(app);
+            let send_result = tx.send(resp);
+            if send_result.is_err() {
+                log::error!("Failed to send event");
+            }
+        };
+
+        let send_result = self.sender.send(AppEvent::Query(Box::new(function)));
+        if send_result.is_err() {
+            return Err(anyhow!("Failed to send event"));
+        }
+
+        let response = rx.recv_timeout(Duration::from_secs(5))?;
+
+        Ok(response)
+    }
+
+    pub fn command<F: FnOnce(&mut App) -> anyhow::Result<()> + Send + 'static>(
+        &self,
+        action: F,
+    ) -> anyhow::Result<()> {
+        let (tx, rx) = mpsc::channel();
+
+        let function = move |app: &mut App| {
+            let resp = action(app);
+            tx.send(resp).unwrap_or_else(|_| log::error!("Failed to send event"));
+        };
+
+        let send_result = self.sender.send(AppEvent::Command(Box::new(function)));
+        if send_result.is_err() {
+            return Err(anyhow!("Failed to send event"));
+        }
+
+        let response = rx.recv_timeout(Duration::from_secs(5))?;
+
+        response
     }
 }
 
-impl EspEventDeserializer for AppEvent {
-    type Data<'a> = AppEvent;
+#[derive(Clone, Debug)]
+pub struct AppClient {
+    bus: AppBus,
+}
 
-    fn deserialize<'a>(data: &EspEvent<'a>) -> Self::Data<'a> {
-        *unsafe { data.as_payload::<AppEvent>() }
+impl AppClient {
+    pub fn start_game(&self) -> anyhow::Result<()> {
+        self.bus.command(|app| {
+            if app.current_game.active() {
+                app.current_game.start();
+            }
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    pub fn team_press(&self, team: Team) -> anyhow::Result<()> {
+        log::info!("Team press {team:#?}");
+        self.bus.command(move |app| {
+            match team {
+                Team::Blue => {
+                    app.bluetooth_audio.play_audio(BLUE_TEAM_CAPTURE_SOUND);
+                }
+                Team::Red => {
+                    app.bluetooth_audio.play_audio(RED_TEAM_CAPTURE_SOUND);
+                }
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn get() -> AppClient {
+        let app_client = APP_CLIENT.get().expect("No app client initialized");
+
+        app_client.clone()
     }
 }
+
+static APP_CLIENT: OnceLock<AppClient> = OnceLock::new();

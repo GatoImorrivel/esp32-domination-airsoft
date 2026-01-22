@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -9,12 +10,17 @@ use esp_idf_svc::hal::{
 
 pub type ButtonCallback = Arc<dyn Fn() + Send + Sync>;
 
-pub struct InputButton<P: InputPin + OutputPin> {
+pub struct InputButton<P: InputPin> {
     driver: Arc<Mutex<PinDriver<'static, P, Input>>>,
     pressed: Arc<AtomicBool>,
     last_press_ms: Arc<AtomicUsize>,
     debounce_ms: usize,
-    callback: Option<ButtonCallback>,
+}
+
+impl<P: InputPin> Debug for InputButton<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InputButton")
+    }
 }
 
 impl<P: InputPin + OutputPin> InputButton<P> {
@@ -23,23 +29,24 @@ impl<P: InputPin + OutputPin> InputButton<P> {
         driver.set_pull(Pull::Up)?;
         driver.set_interrupt_type(InterruptType::NegEdge)?;
 
-        Ok(Self {
+        let mut btn = Self {
             driver: Arc::new(Mutex::new(driver)),
             pressed: Arc::new(AtomicBool::new(false)),
             last_press_ms: Arc::new(AtomicUsize::new(0)),
             debounce_ms,
-            callback: None,
-        })
+        };
+
+        btn.setup_interrupt().unwrap();
+
+        Ok(btn)
     }
 
     /// Set a callback to be invoked when the button is pressed (in ISR context).
     /// Callback should be fast and non-blocking.
-    pub fn set_callback<F: Fn() + Send + Sync + 'static>(&mut self, callback: F) -> anyhow::Result<()> {
-        self.callback = Some(Arc::new(callback));
+    pub fn setup_interrupt(&mut self) -> anyhow::Result<()> {
         let pressed = self.pressed.clone();
         let last_press = self.last_press_ms.clone();
         let debounce = self.debounce_ms;
-        let callback = self.callback.clone();
         let driver = self.driver.clone();
         let mut locked_driver = self.driver.lock().unwrap();
         unsafe {
@@ -52,10 +59,6 @@ impl<P: InputPin + OutputPin> InputButton<P> {
                     // Update timestamp immediately to prevent re-triggering during debounce window
                     last_press.store(now_ms, Ordering::SeqCst);
                     pressed.store(true, Ordering::SeqCst);
-
-                    if let Some(cb) = &callback {
-                        cb();
-                    }
                 } else {
                     // Still in debounce window, update timestamp to extend the window
                     last_press.store(now_ms, Ordering::SeqCst);

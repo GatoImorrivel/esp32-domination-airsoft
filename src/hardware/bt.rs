@@ -1,10 +1,12 @@
+use std::fmt::Debug;
 use std::result::Result::Ok;
+use std::sync::Arc;
 use std::{
     fmt::Display,
     sync::{
         atomic::AtomicBool,
         mpsc::{Receiver, Sender},
-        Arc, OnceLock, RwLock,
+        OnceLock, RwLock,
     },
 };
 
@@ -37,10 +39,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static AUDIO_GEN: AtomicU32 = AtomicU32::new(0);
 
-fn spawn_audio_task(rx: Receiver<AudioCommand>) {
+fn spawn_audio_task(bt: Arc<BluetoothAudio>, rx: Receiver<AudioCommand>) {
     std::thread::spawn(move || {
-        let bt = BluetoothAudio::get().unwrap();
-
         const CHUNK: usize = 512;
         const PREFILL: usize = 4096;
 
@@ -120,8 +120,6 @@ struct Ringbuf(RingbufHandle_t);
 unsafe impl Send for Ringbuf {}
 unsafe impl Sync for Ringbuf {}
 
-static BLUETOOTH_AUDIO: OnceLock<BluetoothAudio> = OnceLock::new();
-
 #[allow(dead_code)]
 pub struct BluetoothAudio {
     driver: Arc<BtClassicDriver>,
@@ -135,29 +133,30 @@ pub struct BluetoothAudio {
     audio_cmd_tx: Sender<AudioCommand>,
 }
 
+impl Debug for BluetoothAudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bluetooth Audio")
+    }
+}
+
 impl BluetoothAudio {
     pub fn init<B: BluetoothModemPeripheral>(
         modem: impl Peripheral<P = B> + 'static,
         nvs: Option<EspDefaultNvsPartition>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<Self>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let bt = BluetoothAudio::new(modem, nvs, tx)?;
-        BLUETOOTH_AUDIO
-            .set(bt)
-            .map_err(|_| anyhow::anyhow!("Bluetooth already initialized"))?;
+        let bt = Arc::new(BluetoothAudio::new(modem, nvs, tx)?);
         log::info!("Init Bluetooth Audio");
-        spawn_audio_task(rx);
-        Ok(())
-    }
-
-    pub fn get() -> anyhow::Result<&'static Self> {
-        let ret = BLUETOOTH_AUDIO.get();
-
-        if ret.is_none() {
-            return Err(anyhow::anyhow!("Bluetooth not initialized"));
-        }
-
-        Ok(ret.unwrap())
+        spawn_audio_task(bt.clone(), rx);
+        let a2dp_bt = bt.clone();
+        let avrc_bt = bt.clone();
+        bt.a2dp.subscribe(move |ev| {
+            Self::a2dp_event_handler(a2dp_bt.clone(), ev)
+        })?;
+        bt.avrc.subscribe(move |ev| {
+            Self::avrc_event_handler(avrc_bt.clone(), ev)
+        })?;
+        Ok(bt.clone())
     }
 
     fn new<B: BluetoothModemPeripheral>(
@@ -171,9 +170,7 @@ impl BluetoothAudio {
         gap.request_variable_pin()?;
         let handle = unsafe { xRingbufferCreate(64 * 1024, RingbufferType_t_RINGBUF_TYPE_BYTEBUF) };
         let avrc = EspAvrcc::new(driver.clone())?;
-        avrc.subscribe(Self::avrc_event_handler)?;
         let a2dp = EspA2dp::new_source(driver.clone())?;
-        a2dp.subscribe(Self::a2dp_event_handler)?;
 
         Ok(Self {
             connection: RwLock::new(None),
@@ -188,11 +185,11 @@ impl BluetoothAudio {
         })
     }
 
-    fn avrc_event_handler(ev: AvrccEvent) {
+    fn avrc_event_handler(bt: Arc<Self>, ev: AvrccEvent) {
         log::info!("{:#?}", ev);
     }
 
-    fn a2dp_event_handler(ev: A2dpEvent) -> usize {
+    fn a2dp_event_handler(bt: Arc<Self>, ev: A2dpEvent) -> usize {
         match ev {
             esp_idf_svc::bt::a2dp::A2dpEvent::ConnectionState {
                 bd_addr,
@@ -206,7 +203,6 @@ impl BluetoothAudio {
                 1
             }
             esp_idf_svc::bt::a2dp::A2dpEvent::SourceData(buffer) => {
-                let bt = Self::get().unwrap();
                 let mut copied = 0;
 
                 unsafe {

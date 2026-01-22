@@ -7,17 +7,15 @@ use esp_idf_svc::{
     wifi::{AsyncWifi, EspWifi},
 };
 
-use crate::{app::App, buttons::InputButton, wifi::Wifi};
+use crate::{app::App, hardware::buttons::InputButton, hardware::wifi::Wifi};
 use crate::{
     app::{AppEvent, Team},
-    bt::BluetoothAudio,
+    hardware::bt::BluetoothAudio,
 };
 
-pub mod app;
 pub mod assets;
-pub mod bt;
-pub mod buttons;
-pub mod wifi;
+pub mod hardware;
+pub mod app;
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();

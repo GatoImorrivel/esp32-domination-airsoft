@@ -1,2 +1,2 @@
-pub const PLUH_SOUND: &[u8; 142764] = include_bytes!("../data/pluh.raw");
-pub const LOW_HONOR_SOUND: &[u8; 918692] = include_bytes!("../data/low-honor-rdr-2.raw");
+pub const RED_TEAM_CAPTURE_SOUND: &[u8] = include_bytes!("../data/zona-vermelha-dominada.sbc");
+pub const BLUE_TEAM_CAPTURE_SOUND: &[u8] = include_bytes!("../data/zona-azul-dominada.sbc");

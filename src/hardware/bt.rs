@@ -16,7 +16,7 @@ use esp_idf_svc::{
         gap::{EspGap, InqMode},
         BdAddr, BtClassic, BtDriver,
     },
-    hal::{delay::FreeRtos, modem::BluetoothModemPeripheral, peripheral::Peripheral},
+    hal::{modem::BluetoothModemPeripheral, peripheral::Peripheral},
     nvs::EspDefaultNvsPartition,
     sys::{
         esp_a2d_media_ctrl, esp_a2d_media_ctrl_t_ESP_A2D_MEDIA_CTRL_START, vRingbufferReturnItem,
@@ -29,7 +29,7 @@ type BtClassicDriver = BtDriver<'static, BtClassic>;
 type EspBtClassicGap = EspGap<'static, BtClassic, Arc<BtClassicDriver>>;
 
 enum AudioCommand {
-    Play(&'static [u8]), // or file path
+    Play(&'static [u8]),
     Stop,
 }
 
@@ -290,7 +290,7 @@ impl BluetoothAudio {
         self.discovered_devices.clone()
     }
 
-    pub fn start_discovery(&self) -> Result<()> {
+    pub fn start_discovery(&self, on_discover: Option<fn(BtDevice) -> ()>) -> Result<()> {
         if self
             .is_in_discovery
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -331,7 +331,10 @@ impl BluetoothAudio {
                     let mut devices = devices.write().expect("Poisoned");
 
                     if !devices.contains(&device) {
-                        devices.push(device);
+                        devices.push(device.clone());
+                        if let Some(callback) = on_discover {
+                            callback(device.clone());
+                        }
                     } else {
                         let (i, other_device) = devices
                             .iter()
@@ -366,17 +369,5 @@ impl BluetoothAudio {
         self.gap.unsubscribe()?;
 
         Ok(())
-    }
-
-    pub async fn discover_devices(&self) -> Arc<[BtDevice]> {
-        let _ = self.start_discovery();
-
-        FreeRtos::delay_ms(10_000);
-
-        let _ = self.stop_discovery();
-
-        let devices = self.discovered_devices();
-        let devices_vec = devices.read().unwrap().clone();
-        devices_vec.into()
     }
 }

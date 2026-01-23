@@ -1,6 +1,6 @@
 use anyhow::{Ok, Result};
 use esp_idf_svc::{
-    eventloop::EspSystemEventLoop, hal::prelude::Peripherals, nvs::EspDefaultNvsPartition, sys::l64a, timer::EspTaskTimerService, wifi::{AsyncWifi, EspWifi}
+    eventloop::EspSystemEventLoop, hal::prelude::Peripherals, mdns::EspMdns, nvs::EspDefaultNvsPartition, sys::l64a, timer::EspTaskTimerService, wifi::{AsyncWifi, EspWifi}
 };
 
 use crate::{app::{App, AppClient, Team}, hardware::{buttons::InputButton, wifi::Wifi}, infra::server::{HttpServer, load_svelte}};
@@ -12,6 +12,8 @@ pub mod assets;
 pub mod hardware;
 pub mod app;
 mod infra;
+
+use esp_idf_svc::mdns;
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();

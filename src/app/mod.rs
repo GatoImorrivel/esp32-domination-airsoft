@@ -54,7 +54,6 @@ impl App {
     }
 
     pub async fn run<F: Fn(&AppClient) -> () + Send + 'static>(mut self, routine: F) {
-        self.wifi.ap_mode().await.unwrap();
         let client = self.client();
         std::thread::spawn(move || {
             loop {

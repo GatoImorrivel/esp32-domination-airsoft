@@ -3,7 +3,7 @@ use esp_idf_svc::{
     eventloop::EspSystemEventLoop, hal::prelude::Peripherals, nvs::EspDefaultNvsPartition, sys::l64a, timer::EspTaskTimerService, wifi::{AsyncWifi, EspWifi}
 };
 
-use crate::{app::{App, AppClient, Team}, hardware::{buttons::InputButton, wifi::Wifi}};
+use crate::{app::{App, AppClient, Team}, hardware::{buttons::InputButton, wifi::Wifi}, infra::server::{HttpServer, load_svelte}};
 use crate::{
     hardware::bt::BluetoothAudio,
 };
@@ -34,7 +34,9 @@ fn main() -> Result<()> {
     let wifi = Wifi::init(async_wifi);
     let bt = BluetoothAudio::init(bt_modem, Some(nvs.clone()))?;
     let app = App::init(wifi, bt);
+    let mut server = HttpServer::new();
 
+    register_routes(&mut server);
 
     esp_idf_svc::hal::task::block_on(async move {
         app.run(move |client| {
@@ -55,4 +57,8 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+fn register_routes(server: &mut HttpServer) {
+    load_svelte(server);
 }

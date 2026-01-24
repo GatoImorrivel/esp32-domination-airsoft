@@ -14,7 +14,6 @@ use anyhow::Result;
 use esp_idf_svc::{
     bt::{
         a2dp::{A2dpEvent, ConnectionStatus, EspA2dp, Source},
-        avrc::controller::{AvrccEvent, EspAvrcc},
         gap::{EspGap, InqMode},
         BdAddr, BtClassic, BtDriver,
     },
@@ -125,10 +124,8 @@ pub struct BluetoothAudio {
     driver: Arc<BtClassicDriver>,
     connection: RwLock<Option<BtDevice>>,
     gap: EspBtClassicGap,
-    discovered_devices: Arc<RwLock<Vec<BtDevice>>>,
     is_in_discovery: AtomicBool,
     a2dp: EspA2dp<'static, BtClassic, Arc<BtClassicDriver>, Source>,
-    avrc: Arc<EspAvrcc<'static, BtClassic, Arc<BtClassicDriver>>>,
     ring_buf: Arc<Ringbuf>,
     audio_cmd_tx: Sender<AudioCommand>,
 }
@@ -149,12 +146,8 @@ impl BluetoothAudio {
         log::info!("Init Bluetooth Audio");
         spawn_audio_task(bt.clone(), rx);
         let a2dp_bt = bt.clone();
-        let avrc_bt = bt.clone();
         bt.a2dp.subscribe(move |ev| {
             Self::a2dp_event_handler(a2dp_bt.clone(), ev)
-        })?;
-        bt.avrc.subscribe(move |ev| {
-            Self::avrc_event_handler(avrc_bt.clone(), ev)
         })?;
         Ok(bt.clone())
     }
@@ -169,7 +162,6 @@ impl BluetoothAudio {
         let gap = EspGap::new(driver.clone())?;
         gap.request_variable_pin()?;
         let handle = unsafe { xRingbufferCreate(64 * 1024, RingbufferType_t_RINGBUF_TYPE_BYTEBUF) };
-        let avrc = EspAvrcc::new(driver.clone())?;
         let a2dp = EspA2dp::new_source(driver.clone())?;
 
         Ok(Self {
@@ -177,16 +169,10 @@ impl BluetoothAudio {
             audio_cmd_tx: tx,
             gap,
             driver: driver.clone(),
-            discovered_devices: Arc::new(RwLock::new(vec![])),
             is_in_discovery: false.into(),
             a2dp,
-            avrc: Arc::new(avrc),
             ring_buf: Arc::new(Ringbuf(handle)),
         })
-    }
-
-    fn avrc_event_handler(bt: Arc<Self>, ev: AvrccEvent) {
-        log::info!("{:#?}", ev);
     }
 
     fn a2dp_event_handler(bt: Arc<Self>, ev: A2dpEvent) -> usize {
@@ -278,91 +264,6 @@ impl BluetoothAudio {
         *conn = Some(device.clone());
 
         self.a2dp.connect_source(&addr)?;
-
-        Ok(())
-    }
-
-    pub fn discovered_devices(&self) -> Arc<RwLock<Vec<BtDevice>>> {
-        self.discovered_devices.clone()
-    }
-
-    pub fn start_discovery(&self, on_discover: Option<fn(BtDevice) -> ()>) -> Result<()> {
-        if self
-            .is_in_discovery
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Ok(());
-        }
-
-        self.is_in_discovery
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        let devices = self.discovered_devices.clone();
-        self.gap.subscribe(move |event| match event {
-            esp_idf_svc::bt::gap::GapEvent::DeviceDiscovered { bd_addr, props } => {
-                for prop in props {
-                    let p = prop.prop();
-                    let mut device_name = None;
-                    let addr = bd_addr;
-                    match p {
-                        esp_idf_svc::bt::gap::DeviceProp::Eir(eir) => {
-                            let name = eir.local_name::<BtClassic, BtClassicDriver>();
-                            if let Some(name) = name {
-                                device_name = Some(name.to_string());
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    let device = {
-                        if let Some(name) = device_name {
-                            BtDevice {
-                                addr,
-                                name: Some(Arc::new(name)),
-                            }
-                        } else {
-                            BtDevice { name: None, addr }
-                        }
-                    };
-                    let mut devices = devices.write().expect("Poisoned");
-
-                    if !devices.contains(&device) {
-                        devices.push(device.clone());
-                        if let Some(callback) = on_discover {
-                            callback(device.clone());
-                        }
-                    } else {
-                        let (i, other_device) = devices
-                            .iter()
-                            .enumerate()
-                            .find(|(_, d)| **d == device)
-                            .unwrap();
-
-                        if other_device.name.is_none() {
-                            devices[i] = device;
-                        }
-                    }
-                    drop(devices);
-                }
-            }
-            _ => {}
-        })?;
-
-        self.gap.start_discovery(InqMode::General, 8, 10)?;
-
-        Ok(())
-    }
-
-    pub fn stop_discovery(&self) -> Result<()> {
-        if !self
-            .is_in_discovery
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Ok(());
-        }
-
-        self.gap.stop_discovery()?;
-        self.gap.unsubscribe()?;
 
         Ok(())
     }

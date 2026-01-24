@@ -2,7 +2,8 @@ mod game;
 
 use std::{
     fmt::Debug,
-    sync::{Arc, OnceLock, mpsc}, time::Duration,
+    sync::{mpsc, Arc, OnceLock},
+    time::Duration,
 };
 
 use anyhow::anyhow;
@@ -53,15 +54,8 @@ impl App {
         app
     }
 
-    pub async fn run<F: Fn(&AppClient) -> () + Send + 'static>(mut self, routine: F) {
+    pub fn run<F: Fn(&mut Self) -> () + Send + 'static>(mut self, routine: F) {
         let client = self.client();
-        std::thread::spawn(move || {
-            loop {
-                routine(&client);
-                // Yield for a little
-                FreeRtos::delay_ms(10);
-            }
-        });
         loop {
             if self.current_game.active() {
                 self.current_game.tick();
@@ -78,8 +72,22 @@ impl App {
                 }
             }
 
+            routine(&mut self);
+
             // Yield for a little
-            FreeRtos::delay_ms(10);
+            FreeRtos::delay_ms(50);
+        }
+    }
+
+    pub fn team_press(&mut self, team: Team) {
+        log::info!("Team press {team:#?}");
+        match team {
+            Team::Blue => {
+                self.bluetooth_audio.play_audio(BLUE_TEAM_CAPTURE_SOUND);
+            }
+            Team::Red => {
+                self.bluetooth_audio.play_audio(RED_TEAM_CAPTURE_SOUND);
+            }
         }
     }
 
@@ -130,7 +138,8 @@ impl AppBus {
 
         let function = move |app: &mut App| {
             let resp = action(app);
-            tx.send(resp).unwrap_or_else(|_| log::error!("Failed to send event"));
+            tx.send(resp)
+                .unwrap_or_else(|_| log::error!("Failed to send event"));
         };
 
         let send_result = self.sender.send(AppEvent::Command(Box::new(function)));
@@ -141,6 +150,21 @@ impl AppBus {
         let response = rx.recv_timeout(Duration::from_secs(5))?;
 
         response
+    }
+
+    pub fn command_no_wait<F: FnOnce(&mut App) -> () + Send + 'static>(
+        &self,
+        action: F,
+    ) -> anyhow::Result<()> {
+        let function = move |app: &mut App| {
+            action(app);
+        };
+
+        let send_result = self.sender.send(AppEvent::Command(Box::new(function)));
+        if send_result.is_err() {
+            return Err(anyhow!("Failed to send event"));
+        }
+        Ok(())
     }
 }
 
@@ -158,22 +182,6 @@ impl AppClient {
             Ok(())
         })?;
 
-        Ok(())
-    }
-
-    pub fn team_press(&self, team: Team) -> anyhow::Result<()> {
-        log::info!("Team press {team:#?}");
-        self.bus.command(move |app| {
-            match team {
-                Team::Blue => {
-                    app.bluetooth_audio.play_audio(BLUE_TEAM_CAPTURE_SOUND);
-                }
-                Team::Red => {
-                    app.bluetooth_audio.play_audio(RED_TEAM_CAPTURE_SOUND);
-                }
-            }
-            Ok(())
-        })?;
         Ok(())
     }
 

@@ -10,7 +10,7 @@ fn main() {
     // 1️⃣ Run `npm install` in web-ui/
     let status = Command::new("npm")
         .arg("install")
-        .current_dir("web-ui")
+        .current_dir("web")
         .status()
         .expect("Failed to run npm install");
     if !status.success() {
@@ -21,7 +21,7 @@ fn main() {
     let status = Command::new("npm")
         .arg("run")
         .arg("build")
-        .current_dir("web-ui")
+        .current_dir("web")
         .status()
         .expect("Failed to run npm run build");
     if !status.success() {

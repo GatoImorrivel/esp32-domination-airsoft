@@ -7,14 +7,17 @@ use std::{
 };
 
 use anyhow::anyhow;
-use esp_idf_svc::hal::delay::FreeRtos;
+use esp_idf_svc::{bt::BdAddr, hal::delay::FreeRtos};
 use game::GameState;
 
 pub use game::{Scores, Team};
 
 use crate::{
     assets::{BLUE_TEAM_CAPTURE_SOUND, RED_TEAM_CAPTURE_SOUND},
-    hardware::{bt::BluetoothAudio, wifi::Wifi},
+    hardware::{
+        bt::{BluetoothAudio, BtDevice},
+        wifi::Wifi,
+    },
 };
 
 pub enum AppEvent {
@@ -183,6 +186,21 @@ impl AppClient {
         })?;
 
         Ok(())
+    }
+
+    pub fn get_bt_devices(&self) -> anyhow::Result<Vec<BtDevice>> {
+        let devices = self.bus.query(|app| {
+            let devices = app.bluetooth_audio.discover_devices(4, 10)?;
+            anyhow::Ok(devices)
+        })??;
+
+        Ok(devices)
+    }
+
+    pub fn connect_bt_device(&self, addr: BdAddr) -> anyhow::Result<()> {
+        self.bus.command(move |app| {
+            app.bluetooth_audio.a2dp_connect(&addr)
+        })
     }
 
     pub fn get() -> AppClient {

@@ -1,16 +1,16 @@
 {
   "name": "web",
-  "version": "1.0.0",
-  "description": "",
-  "license": "ISC",
-  "author": "",
-  "type": "commonjs",
-  "main": "index.js",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "node build.js"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
-  "dependencies": {
-    "htmx.org": "^2.0.8"
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "svelte": "^5.43.8",
+    "vite": "^7.2.4"
   }
 }

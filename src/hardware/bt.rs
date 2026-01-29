@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::result::Result::Ok;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 use std::{
     fmt::Display,
     sync::{
@@ -10,7 +11,8 @@ use std::{
     },
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::{
     bt::{
         a2dp::{A2dpEvent, ConnectionStatus, EspA2dp, Source},
@@ -25,6 +27,7 @@ use esp_idf_svc::{
         RingbufferType_t_RINGBUF_TYPE_BYTEBUF,
     },
 };
+use serde::{de, Deserialize, Serialize};
 
 type BtClassicDriver = BtDriver<'static, BtClassic>;
 type EspBtClassicGap = EspGap<'static, BtClassic, Arc<BtClassicDriver>>;
@@ -85,22 +88,22 @@ fn spawn_audio_task(bt: Arc<BluetoothAudio>, rx: Receiver<AudioCommand>) {
     });
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BtDevice {
-    name: Option<Arc<String>>,
-    addr: BdAddr,
+    pub name: Option<String>,
+    pub addr: [u8; 6],
 }
 
 impl Display for BtDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name: &str = {
             if let Some(name) = &self.name {
-                name.as_str()
+                name
             } else {
                 "Unknown"
             }
         };
-        write!(f, "{} at {}", name, self.addr.to_string())
+        write!(f, "{} at {}", name, BdAddr::from_bytes(self.addr))
     }
 }
 
@@ -122,7 +125,6 @@ unsafe impl Sync for Ringbuf {}
 #[allow(dead_code)]
 pub struct BluetoothAudio {
     driver: Arc<BtClassicDriver>,
-    connection: RwLock<Option<BtDevice>>,
     gap: EspBtClassicGap,
     is_in_discovery: AtomicBool,
     a2dp: EspA2dp<'static, BtClassic, Arc<BtClassicDriver>, Source>,
@@ -146,9 +148,8 @@ impl BluetoothAudio {
         log::info!("Init Bluetooth Audio");
         spawn_audio_task(bt.clone(), rx);
         let a2dp_bt = bt.clone();
-        bt.a2dp.subscribe(move |ev| {
-            Self::a2dp_event_handler(a2dp_bt.clone(), ev)
-        })?;
+        bt.a2dp
+            .subscribe(move |ev| Self::a2dp_event_handler(a2dp_bt.clone(), ev))?;
         Ok(bt.clone())
     }
 
@@ -165,7 +166,6 @@ impl BluetoothAudio {
         let a2dp = EspA2dp::new_source(driver.clone())?;
 
         Ok(Self {
-            connection: RwLock::new(None),
             audio_cmd_tx: tx,
             gap,
             driver: driver.clone(),
@@ -252,19 +252,65 @@ impl BluetoothAudio {
         self.audio_cmd_tx.send(AudioCommand::Play(data)).ok();
     }
 
-    pub fn a2dp_connect(&self, device: &BtDevice) -> Result<()> {
-        let mut conn = self.connection.write().unwrap();
-
-        if conn.is_some() {
-            return Err(anyhow::anyhow!("Already connected"));
-        }
-
-        let addr = device.addr.clone();
-
-        *conn = Some(device.clone());
-
-        self.a2dp.connect_source(&addr)?;
+    pub fn a2dp_connect(&self, addr: &BdAddr) -> Result<()> {
+        self.a2dp.connect_source(addr)?;
 
         Ok(())
+    }
+
+    pub fn discover_devices(
+        &self,
+        duration: u8,
+        max_responses: usize,
+    ) -> anyhow::Result<Vec<BtDevice>> {
+        let devices: Arc<Mutex<Vec<BtDevice>>> = Arc::new(Mutex::new(vec![]));
+        let devices_handler = devices.clone();
+
+        self.gap.subscribe(move |event| match event {
+            esp_idf_svc::bt::gap::GapEvent::DeviceDiscovered { bd_addr, props } => {
+                let mut devices = devices_handler.lock().unwrap();
+                let has_device = devices.iter().find(|d| d.addr == bd_addr.addr()).is_some();
+                if has_device {
+                    return;
+                }
+                let mut device_name = None;
+                for prop in props {
+                    let p = prop.prop();
+                    match p {
+                        esp_idf_svc::bt::gap::DeviceProp::Eir(eir) => {
+                            let name = eir.local_name::<BtClassic, BtClassicDriver>();
+                            if let Some(name) = name {
+                                device_name = Some(name.to_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let device = BtDevice {
+                    name: device_name,
+                    addr: bd_addr.addr(),
+                };
+                log::info!("Discovered {:?}", &device);
+
+                devices.push(device.clone());
+            }
+            _ => {}
+        })?;
+
+        self.gap
+            .start_discovery(InqMode::General, duration, max_responses)?;
+        FreeRtos::delay_ms(duration as u32 * 1000);
+        self.gap.stop_discovery()?;
+        self.gap.unsubscribe()?;
+
+        let device = match Arc::try_unwrap(devices) {
+            Ok(mutex) => {
+                let device = mutex.into_inner().unwrap();
+                device
+            }
+            Err(_) => panic!("still shared"),
+        };
+
+        Ok(device)
     }
 }

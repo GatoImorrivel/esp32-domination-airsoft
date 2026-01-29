@@ -1,12 +1,10 @@
 use anyhow::Ok;
 use esp_idf_svc::{
-    http::{
-        headers::content_type,
-        server::EspHttpServer,
-    },
-    io::{Read, Write}
+    http::{headers::content_type, server::EspHttpServer},
+    io::{Read, Write},
 };
 use include_dir::{include_dir, Dir};
+use serde::Serialize;
 
 static WEB_BUILD: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
 
@@ -27,7 +25,7 @@ impl HttpServer {
             esp_http_server: server,
         }
     }
-    pub fn get<S: AsRef<str>, F: Fn() -> Response + Send + Sync + 'static>(
+    pub fn get<S: AsRef<str>, F: Fn() -> anyhow::Result<Response> + Send + Sync + 'static>(
         &mut self,
         url: S,
         handler: F,
@@ -38,14 +36,19 @@ impl HttpServer {
                 esp_idf_svc::http::Method::Get,
                 move |request| {
                     let response = handler();
+                    if let Err(err) = response {
+                        log::error!("Error handling {}: {}", request.uri(), err);
+                        return request
+                            .into_status_response(500)?
+                            .write_all(err.to_string().as_bytes());
+                    }
+                    let response = response.unwrap();
                     let body = response.body();
                     request
                         .into_response(
                             response.status_code,
                             None,
-                            &[
-                                content_type(&response.content_type.into_media_type().0),
-                            ],
+                            &[content_type(&response.content_type.into_media_type().0)],
                         )?
                         .write_all(body)
                         .map(|_| ())
@@ -59,41 +62,68 @@ impl HttpServer {
     pub fn post<
         S: AsRef<str>,
         B: for<'a> serde::Deserialize<'a> + 'static,
-        F: Fn(B) -> Response + Send + Sync + 'static,
+        F: Fn(B) -> anyhow::Result<Response> + Send + Sync + 'static,
     >(
         &mut self,
         url: S,
         handler: F,
     ) -> &mut Self {
         self.esp_http_server
-            .fn_handler::<anyhow::Error, _>(
+            .fn_handler(
                 url.as_ref(),
                 esp_idf_svc::http::Method::Post,
                 move |mut request| {
                     let len = request
                         .header("Content-Length")
                         .unwrap_or("0")
-                        .parse::<usize>()?;
+                        .parse::<usize>();
+
+                    if let Err(err) = len {
+                        return request
+                            .into_status_response(500)?
+                            .write_all(err.to_string().as_bytes());
+                    }
+
+                    let len = len.unwrap();
 
                     if len > MAX_PAYLOAD_LEN {
-                        request
+                        return request
                             .into_status_response(413)?
-                            .write_all("Request too big".as_bytes())?;
-                        return Ok(());
+                            .write_all("Request too big".as_bytes());
                     }
 
                     let mut buf = vec![0; len];
-                    request.read_exact(&mut buf)?;
+                    let read_result = request.read_exact(&mut buf);
 
-                    let response = handler(serde_json::from_slice::<B>(&buf)?);
+                    if let Err(err) = read_result {
+                        return request
+                            .into_status_response(400)?
+                            .write_all(err.to_string().as_bytes());
+                    }
+
+                    let data = serde_json::from_slice::<B>(&buf);
+
+                    if let Err(err) = data {
+                        return request
+                            .into_status_response(422)?
+                            .write_all(err.to_string().as_bytes());
+                    }
+
+                    let response = handler(data.unwrap());
+                    if let Err(err) = response {
+                        log::error!("Error handling {}: {}", request.uri(), err);
+                        return request
+                            .into_status_response(500)?
+                            .write_all(err.to_string().as_bytes());
+                    }
+                    let response = response.unwrap();
                     request
                         .into_response(
                             response.status_code,
                             None,
                             &[content_type(&response.content_type.into_media_type().0)],
                         )?
-                        .write_all(response.body())?;
-                    Ok(())
+                        .write_all(response.body())
                 },
             )
             .unwrap();
@@ -134,6 +164,14 @@ impl Response {
 
 pub struct Json(String);
 
+impl Json {
+    pub fn new<T: Serialize + ?Sized>(data: &T) -> anyhow::Result<Self> {
+        Ok(Self {
+            0: serde_json::to_string(data)?,
+        })
+    }
+}
+
 impl Into<Response> for Json {
     fn into(self) -> Response {
         Response {
@@ -161,7 +199,7 @@ pub enum ContentType {
     Ttf,
     Json,
     OctetStream,
-    Text
+    Text,
 }
 
 impl ContentType {
@@ -198,7 +236,7 @@ impl ContentType {
             Self::Ttf => "font/ttf",
             Self::Json => "application/json",
             Self::OctetStream => "application/octet-stream",
-            Self::Text => "text/plain"
+            Self::Text => "text/plain",
         };
         MediaType(media_type)
     }
@@ -225,10 +263,12 @@ impl Into<&'static str> for ContentType {
 pub fn load_web(server: &mut HttpServer) {
     if let Some(index) = WEB_BUILD.get_file("index.html") {
         let contents = index.contents();
-        server.get("/", move || Response {
-            status_code: 200,
-            content_type: ContentType::Html,
-            body: ResponseBody::Bytes(contents),
+        server.get("/", move || {
+            Ok(Response {
+                status_code: 200,
+                content_type: ContentType::Html,
+                body: ResponseBody::Bytes(contents),
+            })
         });
     }
 
@@ -238,15 +278,21 @@ pub fn load_web(server: &mut HttpServer) {
             let route = format!("/{}", file.path().display());
 
             let contents = file.contents();
-            let extension = file.path().extension().and_then(|s| s.to_str()).unwrap_or("");
+            let extension = file
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
             let content_type = ContentType::from(extension);
 
             let contents = contents;
 
-            server.get(route, move || Response {
-                status_code: 200,
-                content_type: content_type,
-                body: ResponseBody::Bytes(contents),
+            server.get(route, move || {
+                Ok(Response {
+                    status_code: 200,
+                    content_type: content_type,
+                    body: ResponseBody::Bytes(contents),
+                })
             });
         }
 
